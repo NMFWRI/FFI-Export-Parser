@@ -1,5 +1,5 @@
-Author: Corey Beinhart
-\nContact: corey@nmhu.edu
+Author: Corey Beinhart  
+Contact: corey@nmhu.edu
 
 This python program functions to migrate FFI data stored in XML files into our PostgreSQL database.
 
@@ -20,13 +20,15 @@ The config file is only setup so far for PostgreSQL connections, but the code ca
 different database connection type. 
 
 For Postgres connections, the format of the config file should be:
-\n[POSTGRESQL]
-\ntype = postgresql
-\ndriver = postgresql+psycopg2
-\nHOST = 
-\nDATABASE = 
-\nUID = 
-\nPWD = 
+
+[POSTGRESQL]  
+type = postgresql  
+driver = postgresql+psycopg2  
+HOST =   
+DATABASE =   
+UID =   
+PWD =  
+
 where all of the blank fields should be filled out as the is relevant by the user, since it will change based on whether
 or not the connection is local or remote.
 

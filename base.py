@@ -816,13 +816,16 @@ class XMLFrame:
 
         :param conn: connection to a Postgres database
         """
-        if self.name in ['monitoring_status', 'species']:
+        if self.name in ['monitoring_status', 'species', 'admin_unit']:
             if self.name == 'monitoring_status':
                 query = """select distinct monitoring_status from monitoring_status"""
                 check_col = 'monitoring_status'
-            else:
+            elif self.name == 'species':
                 query = """select distinct symbol from species"""
                 check_col = 'symbol'
+            elif self.name == 'admin_unit':
+                query = """select distinct admin_unit from admin_unit"""
+                check_col = 'admin_unit'
             try:
                 check_df = read_sql(query, conn)
                 check_list = list(check_df[check_col])

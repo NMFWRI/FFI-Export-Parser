@@ -7,7 +7,7 @@ from base import *
 
 def main():
     # Fill this in before running!!!!
-    path = ''
+    path = 'C:/Users/Corey/OneDrive/OneDrive - New Mexico Highlands University/Data Requests/Ocate/FFI Exports'
 
     # users need to create their own local config file (see README)
     config = configparser.ConfigParser()

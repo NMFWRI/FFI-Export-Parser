@@ -6,7 +6,8 @@ from base import *
 
 
 def main():
-    path = 'C:/Users/Corey/OneDrive/OneDrive - New Mexico Highlands University/Data/FFI test'
+    # Fill this in before running!!!!
+    path = ''
 
     # users need to create their own local config file (see README)
     config = configparser.ConfigParser()

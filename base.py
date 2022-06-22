@@ -3,6 +3,8 @@ from re import sub, findall, match
 from datetime import date
 from sqlalchemy import exc, MetaData, Table, text, sql
 from numpy import nan
+from hashlib import sha256
+import xml.etree.ElementTree as ET
 
 options.mode.chained_assignment = None
 
@@ -108,14 +110,21 @@ class FFIFile:
     the element names that appear in the XML file.
     """
 
-    def __init__(self, root):
+    def __init__(self, file):
         """
         parses a ElementTree root element and creates the FFIFile class
         """
+        with open(file) as open_file:
+            f = open_file.read()
+            file_hash = sha256(f.encode())
+            file_id = file_hash.hexdigest()
 
-        self._file = root
-        self._namespace = findall(r'\{http://\w+\.\w{3}[\w/.\d]+\}', self._file.tag)[0].strip('{}')
-        self.tables = list(set([strip_namespace(element.tag) for element in root]))
+        self._id = file_id
+        self._file = file
+        self._tree = ET.parse(file)
+        self._root = self._tree.getroot()
+        self._namespace = findall(r'\{http://\w+\.\w{3}[\w/.\d]+\}', self._root.tag)[0].strip('{}')
+        self.tables = list(set([strip_namespace(element.tag) for element in self._root]))
         self._data_map = {}
         self._parse_data()
         self.project_name = self._data_map['RegistrationUnit']['RegistrationUnit_Name'][0]
@@ -139,12 +148,11 @@ class FFIFile:
         """
 
         for table in self.tables:
-            all_data = self._file.findall(table, namespaces={'': self._namespace})
+            all_data = self._root.findall(table, namespaces={'': self._namespace})
             dfs = [DataFrame({strip_namespace(attr.tag): [attr.text] for attr in data_set}) for data_set in all_data]
             df = concat(dfs)
             self._data_map[strip_namespace(table)] = df
 
-    # TODO: fix this
     def exists_admin_export(self, conn):
         """
         This will use the conn element to check if the specific export has already been written to the database.
@@ -153,9 +161,9 @@ class FFIFile:
         :param conn: SQLAlchemy PostgreSQL connection object for the production database
         """
 
-        query = """select admin_unit, ffi_version from admin_unit
-                     where admin_unit = '{}' and ffi_version = '{}'""".format(self.project_name,
-                                                                              self.ffi_version)
+        query = """select file_id, ffi_version from file_info
+                     where file_id = '{}' and ffi_version = '{}'""".format(self._id,
+                                                                           self.ffi_version)
         try:
             exist = read_sql(query, conn)
             if len(exist) > 0:
@@ -241,14 +249,25 @@ class FFIFile:
         attr_data = basic_tables['attr_data']
 
         # the names with which these tables will be written
-        table_list = ['admin_unit', 'sampling_event', 'monitoring_status', 'project',
+        table_list = ['file_info', 'admin_unit', 'sampling_event', 'monitoring_status', 'project',
                       'species', 'plot', 'project_plot', 'event_detail', 'method_data']
         # table_dict = {}
         frames = []
 
+        # TODO: EVENTUALLY!!! Come up with a neater way of creating these tables.
+
         for table in table_list:
 
-            if table == 'admin_unit':
+            if table == 'file_info':
+                file_dict = {'file_id': [self._id],
+                             'admin_units': [self.project_name],
+                             'ffi_version': [self.ffi_version]}
+                file_df = DataFrame(file_dict)
+                file_info = XMLFrame(table, file_df)
+
+                final = file_info
+
+            elif table == 'admin_unit':
                 reg_table = self['RegistrationUnit']
                 schema_table = self['Schema_Version']
                 schema_version = schema_table['Schema_Version']

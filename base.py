@@ -16,11 +16,11 @@ def create_url(**kwargs):
     your own s
 
     """
-    if kwargs['type'] == 'postgresql':
+    if 'postgresql' in kwargs['type']:
         conn_str = "{}://{}:{}@{}/{}".format(
             kwargs['driver'],
-            kwargs['uid'],
-            kwargs['pwd'],
+            kwargs['username'],
+            kwargs['password'],
             kwargs['host'],
             kwargs['database']
         )
@@ -120,13 +120,14 @@ class FFIFile:
             file_id = file_hash.hexdigest()
 
         self._id = file_id
-        self._file = file
+        self.file = file
         self._tree = ET.parse(file)
         self._root = self._tree.getroot()
         self._namespace = findall(r'\{http://\w+\.\w{3}[\w/.\d]+\}', self._root.tag)[0].strip('{}')
-        self.tables = list(set([strip_namespace(element.tag) for element in self._root]))
+        # self.tables = list(set([strip_namespace(element.tag) for element in self._root]))
         self._data_map = {}
         self._parse_data()
+
         self.project_name = self._data_map['RegistrationUnit']['RegistrationUnit_Name'][0]
         self.ffi_version = self._data_map['Schema_Version']['Schema_Version'][0]
 
@@ -134,9 +135,11 @@ class FFIFile:
         """
         I needed to create some way to index the FFIFile class, so this will pass the index to the data_map and return
         whatever that operation returns.
+
+        e.g <FFIFile>['column'] returns <internal DataFrame>['column']
         """
 
-        if item in self.tables:
+        if item in self._data_map.keys():
             return self._data_map[item]
         else:
             raise KeyError('{} not in FFI XML file.'.format(item))
@@ -146,10 +149,17 @@ class FFIFile:
         Iterates through each element name that was produced in the __init__ operation. This is what actually populates
         the data_map element
         """
+        needed_tables = ['MacroPlot', 'RegistrationUnit', 'MM_ProjectUnit_MacroPlot', 'ProjectUnit', 'SampleEvent',
+                         'MM_MonitoringStatus_SampleEvent', 'MonitoringStatus', 'MethodAttribute', 'AttributeData',
+                         'Method', 'LU_DataType', 'Schema_Version', 'MasterSpecies', 'SampleData', 'SampleAttribute',
+                         'LocalSpecies']
 
-        for table in self.tables:
+        for table in needed_tables:
             all_data = self._root.findall(table, namespaces={'': self._namespace})
-            dfs = [DataFrame({strip_namespace(attr.tag): [attr.text] for attr in data_set}) for data_set in all_data]
+            dfs = [
+                DataFrame({strip_namespace(attr.tag): [attr.text] for attr in data_set})
+                for data_set in all_data
+            ]
             df = concat(dfs)
             self._data_map[strip_namespace(table)] = df
 
@@ -173,10 +183,10 @@ class FFIFile:
         except exc.ProgrammingError:
             return False
 
-    def _create_basic_tables(self):
+    def _create_cte_tables(self):
         """
-        This creates some "basic" tables that serve as building blocks for all of the other tables. I really don't like
-        this, but it was the most elegant solution I could come up with.
+        These are the pandas equivalent of CTEs I was using in SQL server that calculate some useful columns before
+        doing the rest of the table creation
 
         The basic tables include: Plots, Events, Monitoring Status, Sample Events, and Attribute Data. I do this
         because we need to compute identifiers and only want to run that operation once when the file is parsed
@@ -184,10 +194,14 @@ class FFIFile:
         :return table_dict: a dictionary of all the "basic tables" as XMLFrames (more on that later)
         """
 
-        # we need to create the plot_id early on so we have the proper linking identifiers across relevant tables
-        plot_table = self['MacroPlot'].merge(self['RegistrationUnit'],
-                                             left_on='MacroPlot_RegistrationUnit_GUID',
-                                             right_on='RegistrationUnit_GUID', how='left')
+        # we need to create the plot_id early on, so we have the proper linking identifiers across relevant tables
+        plot_table = self['MacroPlot'] \
+            .merge(self['RegistrationUnit'],
+                   left_on='MacroPlot_RegistrationUnit_GUID',
+                   right_on='RegistrationUnit_GUID', how='left') \
+            .merge(self['MM_ProjectUnit_MacroPlot'], left_on='MacroPlot_GUID',
+                   right_on='MM_MacroPlot_GUID', how='left') \
+            .merge(self['ProjectUnit'], left_on='MM_ProjectUnit_GUID', right_on='ProjectUnit_GUID', how='left')
         plot_id = XMLFrame('plot', plot_table)
 
         # similar to plots, we create the event_id as a unique identifier and that needs to be linked across
@@ -212,8 +226,6 @@ class FFIFile:
 
         # this is how we link events, plots, and the weird columnar attribute name/values
         sample_events = event_table \
-            .merge(self['MM_ProjectUnit_MacroPlot'], left_on='MacroPlot_GUID',
-                   right_on='MM_MacroPlot_GUID', how='left') \
             .merge(monitoring_table, left_on='MM_MonitoringStatus_GUID', right_on='MonitoringStatus_GUID', how='left') \
             .merge(self['ProjectUnit'], left_on='MM_ProjectUnit_GUID', right_on='ProjectUnit_GUID', how='left')
         sample_events_xml = XMLFrame('sample_events', sample_events)
@@ -241,7 +253,7 @@ class FFIFile:
 
         This is just a bunch of specific tables with their specific relationships to each other explicitly defined.
         """
-        basic_tables = self._create_basic_tables()
+        basic_tables = self._create_cte_tables()
         plot_id = basic_tables['plot_id']
         event_id = basic_tables['event_id']
         monitoring_status = basic_tables['monitoring_status']
@@ -250,11 +262,8 @@ class FFIFile:
 
         # the names with which these tables will be written
         table_list = ['file_info', 'admin_unit', 'sampling_event', 'monitoring_status', 'project',
-                      'species', 'plot', 'project_plot', 'event_detail', 'method_data']
-        # table_dict = {}
+                      'species', 'plot', 'event_detail', 'method_data']
         frames = []
-
-        # TODO: EVENTUALLY!!! Come up with a neater way of creating these tables.
 
         for table in table_list:
 
@@ -262,18 +271,20 @@ class FFIFile:
                 file_dict = {'file_id': [self._id],
                              'admin_units': [self.project_name],
                              'ffi_version': [self.ffi_version]}
+
                 file_df = DataFrame(file_dict)
                 file_info = XMLFrame(table, file_df)
 
                 final = file_info
 
             elif table == 'admin_unit':
+                reg_cols = {'RegistrationUnit_Name': 'admin_unit',
+                            'RegistrationUnit_Comment': 'details'}
+
                 reg_table = self['RegistrationUnit']
                 schema_table = self['Schema_Version']
                 schema_version = schema_table['Schema_Version']
 
-                reg_cols = {'RegistrationUnit_Name': 'admin_unit',
-                            'RegistrationUnit_Comment': 'details'}
                 admin_temp = XMLFrame(table, reg_table)
                 admin_unit = admin_temp[reg_cols]
                 admin_unit['unit_identifier'] = ''
@@ -288,46 +299,36 @@ class FFIFile:
                               'SampleEvent_Who': 'personnel',
                               'SampleEvent_Comment': 'note',
                               'monitoring_status': 'monitoring_status'}
+
                 events = event_id[event_cols]
                 events.drop_duplicates()
                 final = events
 
             elif table == 'monitoring_status':
-                mon_cols = ['status_prefix', 'monitoring_type', 'time_frame', 'monitoring_status']
+                mon_cols = ['monitoring_status', 'status_prefix', 'monitoring_type', 'time_frame']
                 mon_status = monitoring_status[mon_cols]
                 mon_status.drop_duplicates()
                 final = mon_status
 
             elif table == 'project':
-                project_table = self['ProjectUnit']
-
-                proj_cols = {'ProjectUnit_Name': 'project_unit',
+                proj_cols = {'ProjectUnit_Name': 'project_name',
+                             'RegistrationUnit_Name': 'admin_unit',
                              'ProjectUnit_DateIn': 'date_created',
                              'ProjectUnit_Description': 'details',
                              'ProjectUnit_Objective': 'treatment_goals',
                              'ProjectUnit_Agency': 'project_agency',
                              'ProjectUnit_Area': 'area',
                              'ProjectUnit_AreaUnits': 'area_units'}
+
+                project_table = self['ProjectUnit'].merge(self['RegistrationUnit'],
+                                                          left_on='ProjectUnit_RegistrationUnitGUID',
+                                                          right_on='RegistrationUnit_GUID', how='left')
                 proj_temp = XMLFrame(table, project_table)
                 project_unit = proj_temp[proj_cols]
-                project_unit['ffi_version'] = schema_version
 
                 final = project_unit
 
-            elif table == 'admin_project':
-                ap_table = self['ProjectUnit'].merge(self['RegistrationUnit'],
-                                                     left_on='ProjectUnit_RegistrationUnitGUID',
-                                                     right_on='RegistrationUnit_GUID', how='left')
-                ap_cols = {'ProjectUnit_Name': 'project_unit',
-                           'RegistrationUnit_Name': 'admin_unit'}
-                ap_temp = XMLFrame(table, ap_table)
-                admin_project = ap_temp[ap_cols]
-
-                final = admin_project
-
             elif table == 'species':
-                species_table = self['MasterSpecies']
-
                 spec_cols = {'MasterSpecies_Symbol': 'symbol',
                              'MasterSpecies_ScientificName': 'scientific_name',
                              'MasterSpecies_CommonName': 'common_name',
@@ -336,6 +337,8 @@ class FFIFile:
                              'MasterSpecies_Family': 'family',
                              'MasterSpecies_Nativity': 'nativity',
                              'MasterSpecies_Lifecycle': 'lifecycle'}
+
+                species_table = self['MasterSpecies']
                 spec_temp = XMLFrame(table, species_table)
                 species = spec_temp[spec_cols]
 
@@ -345,6 +348,7 @@ class FFIFile:
                 plot_cols = {'PlotID': 'plot_id',
                              'MacroPlot_Name': 'plot_name',
                              'RegistrationUnit_Name': 'admin_unit',
+                             'ProjectUnit_Name': 'project_name',
                              'MacroPlot_Purpose': 'purpose',
                              'MacroPlot_Type': 'plot_type',
                              'MacroPlot_DD_Lat': 'lat',
@@ -362,22 +366,12 @@ class FFIFile:
 
                 final = plots
 
-            elif table == 'project_plot':
-                pup_table = self['MM_ProjectUnit_MacroPlot'] \
-                    .merge(self['ProjectUnit'], left_on='MM_ProjectUnit_GUID', right_on='ProjectUnit_GUID',
-                           how='left') \
-                    .merge(plot_id.to_df(), left_on='MM_MacroPlot_GUID', right_on='MacroPlot_GUID', how='left') \
-                    .merge(self['RegistrationUnit'], left_on='MacroPlot_RegistrationUnit_GUID',
-                           right_on='RegistrationUnit_GUID', how='left')
-
-                pup_cols = {'PlotID': 'plot_id',
-                            'ProjectUnit_Name': 'project_name'}
-                pup_temp = XMLFrame(table, pup_table)
-                project_plot = pup_temp[pup_cols]
-
-                final = project_plot
-
             elif table == 'event_detail':
+                ed_cols = {'EventID': 'event_id',
+                           'FieldName': 'field_name',
+                           'DataValue': 'data_value',
+                           'LU_DataType_Name': 'data_type'}
+
                 event_data_temp = self['SampleData'] \
                     .merge(sample_events.to_df(), left_on='SampleData_SampleEvent_GUID', right_on='SampleEvent_GUID_y', how='left') \
                     .merge(self['SampleAttribute'], left_on='SampleData_SampleAtt_ID', right_on='SampleAtt_ID',
@@ -386,10 +380,6 @@ class FFIFile:
                     .merge(self['LU_DataType'], left_on='SampleAtt_DataType_GUID', right_on='LU_DataType_GUID',
                            how='left')
 
-                ed_cols = {'EventID': 'event_id',
-                           'FieldName': 'field_name',
-                           'DataValue': 'data_value',
-                           'LU_DataType_Name': 'data_type'}
                 ed_idx = ['event_id']
                 event_data_test = XMLFrame(table, event_data_temp)
                 event_data = event_data_test[ed_cols]
@@ -432,6 +422,24 @@ class FFIFile:
             print("Processed {} table.".format(table))
 
         return frames
+
+    def get_admin_units(self):
+        admin_units = self['admin_unit']
+        units = list(admin_units['admin_unit'].unique())
+
+        return units
+
+    def get_projects(self):
+        projects = self['project']
+        proj_names = list(projects['project_name'])
+
+        return proj_names
+
+    def get_plots(self):
+        plots = self['plot']
+        plot_names = list(plots['plot_id'])
+
+        return plot_names
 
 
 class XMLFrame:
@@ -527,7 +535,7 @@ class XMLFrame:
         """
         creates an id column - attempts to determine which id column will get created based on column names.
         """
-        def id_str(row, col_list):
+        def id_str(row, col_list, no_date=False):
             """
             intended for use as a lambda function with the underlying DataFrame
             """
@@ -536,10 +544,14 @@ class XMLFrame:
             else:
                 # takes plot name, the datetimenumber, and the first 5 letters of the admin_unit and concatenates them
                 vals = [row[col] for col in col_list]
-                norm_plot = ''.join(findall(r'\w+', vals[1]))
-                norm_date = to_datenum(vals[0])
-                norm_admin = vals[2][:5].upper()
-                item_id = '-'.join([norm_admin, norm_plot, norm_date])
+                norm_plot = ''.join(findall(r'\w+', vals[1])).upper().replace('-', '').replace('_', '').replace(' ', '')
+
+                norm_admin = vals[2][:5].upper().replace('-', '').replace('_', '').replace(' ', '')
+                if no_date:
+                    item_id = '-'.join([norm_admin, norm_plot])
+                else:
+                    norm_date = to_datenum(vals[0])
+                    item_id = '-'.join([norm_admin, norm_plot, norm_date])
 
                 return item_id
 
@@ -548,7 +560,7 @@ class XMLFrame:
             self.df['EventID'] = self.df.apply(lambda row: id_str(row, cols), axis=1)
         elif self.name == 'plot':
             cols = ['MacroPlot_DateIn', 'MacroPlot_Name', 'RegistrationUnit_Name']
-            self.df['PlotID'] = self.df.apply(lambda row: id_str(row, cols), axis=1)
+            self.df['PlotID'] = self.df.apply(lambda row: id_str(row, cols, no_date=True), axis=1)
         else:
             raise KeyError
 
@@ -908,7 +920,7 @@ class XMLFrame:
 
     def drop_duplicate_fields(self, *args):
         """
-        because of the strange FFI data format, sometimes duplicate columns get produced and we need to remove them
+        because of the strange FFI data format, sometimes duplicate columns get produced, and we need to remove them
         """
         if (self.name == 'event_detail' or self.name == 'method_data') and len(args) > 0 and isinstance(args[0], list):
             idx = args[0].copy()

@@ -1,3 +1,5 @@
+import os
+
 from pandas import DataFrame, concat, isna, read_sql, options
 from re import sub, findall, match
 from datetime import date
@@ -115,7 +117,8 @@ class FFIFile:
         parses a ElementTree root element and creates the FFIFile class
         """
         with open(file) as open_file:
-            f = open_file.read()
+            f_gen = (open_file.readline() for i in range(50000))
+            f = '\n'.join(f_gen)
             file_hash = sha256(f.encode())
             file_id = file_hash.hexdigest()
 
@@ -204,16 +207,6 @@ class FFIFile:
             .merge(self['ProjectUnit'], left_on='MM_ProjectUnit_GUID', right_on='ProjectUnit_GUID', how='left')
         plot_id = XMLFrame('plot', plot_table)
 
-        # similar to plots, we create the event_id as a unique identifier and that needs to be linked across
-        # several disparate tables.
-        event_table = self['SampleEvent'].merge(plot_table, left_on='SampleEvent_Plot_GUID',
-                                                right_on='MacroPlot_GUID', how='left')\
-            .merge(self['MM_MonitoringStatus_SampleEvent'], left_on='SampleEvent_GUID', right_on='MM_SampleEvent_GUID',
-                   how='left')\
-            .merge(self['MonitoringStatus'], left_on='MM_MonitoringStatus_GUID', right_on='MonitoringStatus_GUID',
-                   how='left')
-        event_id = XMLFrame('sampling_event', event_table)
-
         # again, some computations need to be done early on, so we create the values here
         monitoring_table = self['MM_MonitoringStatus_SampleEvent'] \
             .merge(self['MonitoringStatus'], left_on='MM_MonitoringStatus_GUID',
@@ -224,11 +217,20 @@ class FFIFile:
                    how='left')
         monitoring_status = XMLFrame('monitoring_status', monitoring_table)
 
+        # similar to plots, we create the event_id as a unique identifier and that needs to be linked across
+        # several disparate tables.
+        event_table = self['SampleEvent'].merge(plot_table, left_on='SampleEvent_Plot_GUID',
+                                                right_on='MacroPlot_GUID', how='left') \
+            .merge(self['MM_MonitoringStatus_SampleEvent'], left_on='SampleEvent_GUID', right_on='MM_SampleEvent_GUID',
+                   how='left') \
+            .merge(self['MonitoringStatus'], left_on='MM_MonitoringStatus_GUID', right_on='MonitoringStatus_GUID',
+                   how='left')
+        event_id = XMLFrame('sampling_event', event_table)
+
         # this is how we link events, plots, and the weird columnar attribute name/values
-        sample_events = event_table \
-            .merge(monitoring_table, left_on='MM_MonitoringStatus_GUID', right_on='MonitoringStatus_GUID', how='left') \
-            .merge(self['ProjectUnit'], left_on='MM_ProjectUnit_GUID', right_on='ProjectUnit_GUID', how='left')
-        sample_events_xml = XMLFrame('sample_events', sample_events)
+        # sample_events = event_table \
+        #     .merge(monitoring_table, left_on='MM_MonitoringStatus_GUID', right_on='MonitoringStatus_GUID', how='left')
+        # sample_events_xml = XMLFrame('sample_events', sample_events)
 
         # this is the linking info for the "methods" data
         attr_data = self['MethodAttribute'] \
@@ -236,10 +238,11 @@ class FFIFile:
                    how='left') \
             .merge(self['Method'], left_on='MethodAtt_Method_GUID', right_on='Method_GUID', how='left') \
             .merge(self['LU_DataType'], left_on='MethodAtt_DataType_GUID', right_on='LU_DataType_GUID', how='left')
+        # attr_data = attr_data_temp.loc[~attr_data_temp['AttributeData_Value'].isna()]
         attr_data_xml = XMLFrame('attr_data', attr_data)
 
         table_dict = {'plot_id': plot_id, 'event_id': event_id, 'monitoring_status': monitoring_status,
-                      'sample_events': sample_events_xml, 'attr_data': attr_data_xml}
+                      'attr_data': attr_data_xml}
 
         return table_dict
 
@@ -257,123 +260,123 @@ class FFIFile:
         plot_id = basic_tables['plot_id']
         event_id = basic_tables['event_id']
         monitoring_status = basic_tables['monitoring_status']
-        sample_events = basic_tables['sample_events']
+        # sample_events = basic_tables['sample_events']
         attr_data = basic_tables['attr_data']
 
         # the names with which these tables will be written
+        # a little sloppy, but I can't really think of a better way to accomplish this without verbosely defining all
+        # the tables that are going to get created.
         table_list = ['file_info', 'admin_unit', 'sampling_event', 'monitoring_status', 'project',
                       'species', 'plot', 'event_detail', 'method_data']
         frames = []
 
         for table in table_list:
 
+            # dummy vars
+            frame = DataFrame()
+            x_frame = DataFrame()
+
             if table == 'file_info':
-                file_dict = {'file_id': [self._id],
-                             'admin_units': [self.project_name],
-                             'ffi_version': [self.ffi_version]}
+                cols = {'file_id': [self._id],
+                        'admin_units': [self.project_name],
+                        'ffi_version': [self.ffi_version]}
 
-                file_df = DataFrame(file_dict)
-                file_info = XMLFrame(table, file_df)
+                frame = DataFrame(cols)
+                x_frame = XMLFrame(table, frame)
 
-                final = file_info
+                final = x_frame
 
             elif table == 'admin_unit':
-                reg_cols = {'RegistrationUnit_Name': 'admin_unit',
-                            'RegistrationUnit_Comment': 'details'}
+                cols = {'RegistrationUnit_Name': 'admin_unit',
+                        'RegistrationUnit_Comment': 'details'}
 
                 reg_table = self['RegistrationUnit']
                 schema_table = self['Schema_Version']
                 schema_version = schema_table['Schema_Version']
 
-                admin_temp = XMLFrame(table, reg_table)
-                admin_unit = admin_temp[reg_cols]
-                admin_unit['unit_identifier'] = ''
-                admin_unit['ffi_version'] = schema_version
+                frame = XMLFrame(table, reg_table)
+                x_frame = frame[cols]
+                x_frame['unit_identifier'] = ''
+                x_frame['ffi_version'] = schema_version
 
-                final = admin_unit
+                final = x_frame
 
             elif table == 'sampling_event':
-                event_cols = {'EventID': 'event_id',
-                              'PlotID': 'plot_id',
-                              'SampleEvent_Date': 'event_date',
-                              'SampleEvent_Who': 'personnel',
-                              'SampleEvent_Comment': 'note',
-                              'monitoring_status': 'monitoring_status'}
+                cols = {'EventID': 'event_id',
+                        'PlotID': 'plot_id',
+                        'SampleEvent_Date': 'event_date',
+                        'SampleEvent_Who': 'personnel',
+                        'SampleEvent_Comment': 'note',
+                        'monitoring_status': 'monitoring_status'}
 
-                events = event_id[event_cols]
-                events.drop_duplicates()
-                final = events
+                frame = event_id[cols]
+                frame.drop_duplicates()
+                final = frame
 
             elif table == 'monitoring_status':
-                mon_cols = ['monitoring_status', 'status_prefix', 'monitoring_type', 'time_frame']
-                mon_status = monitoring_status[mon_cols]
-                mon_status.drop_duplicates()
-                final = mon_status
+                cols = ['monitoring_status', 'status_prefix', 'monitoring_type', 'time_frame']
+                frame = monitoring_status[cols]
+                frame.drop_duplicates()
+                final = frame
 
             elif table == 'project':
-                proj_cols = {'ProjectUnit_Name': 'project_name',
-                             'RegistrationUnit_Name': 'admin_unit',
-                             'ProjectUnit_DateIn': 'date_created',
-                             'ProjectUnit_Description': 'details',
-                             'ProjectUnit_Objective': 'treatment_goals',
-                             'ProjectUnit_Agency': 'project_agency',
-                             'ProjectUnit_Area': 'area',
-                             'ProjectUnit_AreaUnits': 'area_units'}
+                cols = {'ProjectUnit_Name': 'project_name',
+                        'RegistrationUnit_Name': 'admin_unit',
+                        'ProjectUnit_DateIn': 'date_created',
+                        'ProjectUnit_Description': 'details',
+                        'ProjectUnit_Objective': 'treatment_goals',
+                        'ProjectUnit_Agency': 'project_agency',
+                        'ProjectUnit_Area': 'area',
+                        'ProjectUnit_AreaUnits': 'area_units'}
 
-                project_table = self['ProjectUnit'].merge(self['RegistrationUnit'],
-                                                          left_on='ProjectUnit_RegistrationUnitGUID',
-                                                          right_on='RegistrationUnit_GUID', how='left')
-                proj_temp = XMLFrame(table, project_table)
-                project_unit = proj_temp[proj_cols]
-
-                final = project_unit
+                frame = self['ProjectUnit'].merge(self['RegistrationUnit'],
+                                                  left_on='ProjectUnit_RegistrationUnitGUID',
+                                                  right_on='RegistrationUnit_GUID', how='left')
+                x_frame = XMLFrame(table, frame)
+                final = x_frame[cols]
 
             elif table == 'species':
-                spec_cols = {'MasterSpecies_Symbol': 'symbol',
-                             'MasterSpecies_ScientificName': 'scientific_name',
-                             'MasterSpecies_CommonName': 'common_name',
-                             'MasterSpecies_ITIS_TSN': 'itis_tsn',
-                             'MasterSpecies_Genus': 'genus',
-                             'MasterSpecies_Family': 'family',
-                             'MasterSpecies_Nativity': 'nativity',
-                             'MasterSpecies_Lifecycle': 'lifecycle'}
+                cols = {'MasterSpecies_Symbol': 'symbol',
+                        'MasterSpecies_ScientificName': 'scientific_name',
+                        'MasterSpecies_CommonName': 'common_name',
+                        'MasterSpecies_ITIS_TSN': 'itis_tsn',
+                        'MasterSpecies_Genus': 'genus',
+                        'MasterSpecies_Family': 'family',
+                        'MasterSpecies_Nativity': 'nativity',
+                        'MasterSpecies_Lifecycle': 'lifecycle'}
 
-                species_table = self['MasterSpecies']
-                spec_temp = XMLFrame(table, species_table)
-                species = spec_temp[spec_cols]
-
-                final = species
+                frame = self['MasterSpecies']
+                x_frame = XMLFrame(table, frame)
+                final = x_frame[cols]
 
             elif table == 'plot':
-                plot_cols = {'PlotID': 'plot_id',
-                             'MacroPlot_Name': 'plot_name',
-                             'RegistrationUnit_Name': 'admin_unit',
-                             'ProjectUnit_Name': 'project_name',
-                             'MacroPlot_Purpose': 'purpose',
-                             'MacroPlot_Type': 'plot_type',
-                             'MacroPlot_DD_Lat': 'lat',
-                             'MacroPlot_DD_Long': 'long',
-                             'MacroPlot_DateIn': 'date_created',
-                             'MacroPlot_Elevation': 'elevation',
-                             'MacroPlot_ElevationUnits': 'elevation_units',
-                             'MacroPlot_Azimuth': 'azimuth',
-                             'MacroPlot_Aspect': 'aspect',
-                             'MacroPlot_SlopeHill': 'hill_slope',
-                             'MacroPlot_SlopeTransect': 'slope_transect',
-                             'MacroPlot_Comment': 'comment',
-                             'MacroPlot_Metadata': 'metadata'}
-                plots = plot_id[plot_cols]
-
-                final = plots
+                cols = {'PlotID': 'plot_id',
+                        'MacroPlot_Name': 'plot_name',
+                        'RegistrationUnit_Name': 'admin_unit',
+                        'ProjectUnit_Name': 'project_name',
+                        'MacroPlot_Purpose': 'purpose',
+                        'MacroPlot_Type': 'plot_type',
+                        'MacroPlot_DD_Lat': 'lat',
+                        'MacroPlot_DD_Long': 'long',
+                        'MacroPlot_DateIn': 'date_created',
+                        'MacroPlot_Elevation': 'elevation',
+                        'MacroPlot_ElevationUnits': 'elevation_units',
+                        'MacroPlot_Azimuth': 'azimuth',
+                        'MacroPlot_Aspect': 'aspect',
+                        'MacroPlot_SlopeHill': 'hill_slope',
+                        'MacroPlot_SlopeTransect': 'slope_transect',
+                        'MacroPlot_Comment': 'comment',
+                        'MacroPlot_Metadata': 'metadata'}
+                final = plot_id[cols]
 
             elif table == 'event_detail':
-                ed_cols = {'EventID': 'event_id',
-                           'FieldName': 'field_name',
-                           'DataValue': 'data_value',
-                           'LU_DataType_Name': 'data_type'}
+                cols = {'EventID': 'event_id',
+                        'FieldName': 'field_name',
+                        'DataValue': 'data_value',
+                        'LU_DataType_Name': 'data_type'}
 
-                event_data_temp = self['SampleData'] \
-                    .merge(sample_events.to_df(), left_on='SampleData_SampleEvent_GUID', right_on='SampleEvent_GUID_y', how='left') \
+                frame = self['SampleData'] \
+                    .merge(event_id.to_df(), left_on='SampleData_SampleEvent_GUID', right_on='SampleEvent_GUID', how='left') \
                     .merge(self['SampleAttribute'], left_on='SampleData_SampleAtt_ID', right_on='SampleAtt_ID',
                            how='left') \
                     .merge(self['Method'], left_on='SampleAtt_Method_ID', right_on='Method_ID', how='left') \
@@ -381,35 +384,33 @@ class FFIFile:
                            how='left')
 
                 ed_idx = ['event_id']
-                event_data_test = XMLFrame(table, event_data_temp)
-                event_data = event_data_test[ed_cols]
-                event_data.drop_duplicate_fields(ed_idx)
-                event_data.pivot_data(ed_idx)
-
-                final = event_data
+                x_frame = XMLFrame(table, frame)
+                final = x_frame[cols]
+                final.drop_duplicate_fields(ed_idx)
+                final.pivot_data(ed_idx)
 
             elif table == 'method_data':
-                method_data_temp = attr_data.to_df() \
-                    .merge(self['SampleData'], left_on='AttributeData_SampleRow_ID',
+                cols = {'AttributeData_DataRow_ID': 'data_row_id',
+                        'EventID': 'event_id',
+                        'Method_Name': 'method',
+                        'FieldName': 'field_name',
+                        'DataValue': 'data_value',
+                        'LU_DataType_Name': 'data_type'}
+
+                sample_data_temp = self['SampleData']
+                sample_data_all = sample_data_temp[['SampleData_SampleRow_ID', 'SampleData_SampleEvent_GUID']]
+                sample_data = sample_data_all.drop_duplicates()
+                frame = attr_data.to_df() \
+                    .merge(sample_data, left_on='AttributeData_SampleRow_ID',
                            right_on='SampleData_SampleRow_ID', how='left') \
-                    .merge(self['LocalSpecies'], left_on='AttributeData_Value', right_on='LocalSpecies_GUID',
-                           how='left') \
-                    .merge(sample_events.to_df(), left_on='SampleData_SampleEvent_GUID', right_on='SampleEvent_GUID_x',
+                    .merge(event_id.to_df(), left_on='SampleData_SampleEvent_GUID', right_on='SampleEvent_GUID',
                            how='left')
 
-                md_cols = {'AttributeData_DataRow_ID': 'data_row_id',
-                           'EventID': 'event_id',
-                           'Method_Name': 'method',
-                           'FieldName': 'field_name',
-                           'DataValue': 'data_value',
-                           'LU_DataType_Name': 'data_type'}
                 md_idx = ['event_id', 'data_row_id']
-                method_data_test = XMLFrame(table, method_data_temp)
-                method_data = method_data_test[md_cols]
-                method_data.drop_duplicate_fields(md_idx)
-                method_data.pivot_data(md_idx)
-
-                final = method_data
+                x_frame = XMLFrame(table, frame)
+                final = x_frame[cols]
+                final.drop_duplicate_fields(md_idx)
+                final.pivot_data(md_idx)
 
             else:
                 raise EnvironmentError
@@ -420,8 +421,23 @@ class FFIFile:
             else:
                 frames.append(final)
             print("Processed {} table.".format(table))
+            del cols, frame, x_frame, final
 
         return frames
+
+    def tables_to_csv(self):
+
+        if not os.path.isdir('csv'):
+            os.mkdir('csv')
+
+        ctes = self._create_cte_tables()
+
+        for table in self._data_map.keys():
+            df = self._data_map[table]
+            df.to_csv('csv/{}.csv'.format(table))
+        for key in ctes.keys():
+            df = ctes[key].to_df()
+            df.to_csv('csv/{}.csv'.format(key))
 
     def get_admin_units(self):
         admin_units = self['admin_unit']
@@ -466,7 +482,7 @@ class XMLFrame:
             self.df = DataFrame(data)
 
         self.columns = self.df.columns
-        self.pivot = None  # this just stores a list of XMLFrames that have been transposed
+        self.pivot = None  # this just stores if a DataFrame has been pivoted
         self.method_type = method_type
 
         if not skip_id:
@@ -671,14 +687,15 @@ class XMLFrame:
                 else:
                     return ''
 
-        if ('MonitoringStatus_Suffix' in self.columns or
-            'MonitoringStatus_Prefix' in self.columns or
-            'MonitoringStatus_Base' in self.columns or
-            'SampleEvent_DefaultMonitoringStatus' in self.columns) and \
-                ('status_prefix' not in self.columns and
-                 'monitoring_type' not in self.columns and
-                 'time_frame' not in self.columns and
-                 'monitoring_status' not in self.columns):
+        # if ('MonitoringStatus_Suffix' in self.columns or
+        #     'MonitoringStatus_Prefix' in self.columns or
+        #     'MonitoringStatus_Base' in self.columns or
+        #     'SampleEvent_DefaultMonitoringStatus' in self.columns) and \
+        if self.name in ['monitoring_status', 'sampling_event'] and \
+                'status_prefix' not in self.columns and \
+                'monitoring_type' not in self.columns and \
+                'time_frame' not in self.columns and \
+                'monitoring_status' not in self.columns:
 
             self.df['status_prefix'] = self.df.apply(prefix_str, axis=1)
             self.df['monitoring_type'] = self.df.apply(base_str, axis=1)
@@ -737,19 +754,15 @@ class XMLFrame:
 
     def _process_attr_value(self):
         """
-        this is almost exclusively for making sure that the Species symbol is correctly populated
+        this is exclusively because DataFrame columns have to be homogenous, so we cast everything to a string
         """
         def attr_val(row):
-            if self.name == 'event_detail':
-                row_val = row['SampleData_Value']
+            if self.name in ['event_detail', 'method_data']:
+                try:
+                    row_val = row['SampleData_Value']
+                except KeyError:
+                    row_val = row['AttributeData_Value']
                 val = str(row_val)
-            elif self.name == 'method_data':
-                row_val = row['AttributeData_Value']
-                species = row['LocalSpecies_Symbol']
-                if not isna(species):
-                    val = species
-                else:
-                    val = str(row_val)
             else:
                 raise ValueError
             return val
@@ -973,9 +986,9 @@ class XMLFrame:
                 data_list.append(new_frame)
 
             self.pivot = data_list
+            self.df = DataFrame()  # just for memory management
 
-        # not used, but added the functionality for generalizing this. Just check that the columns that are going to be
-        # used for 'columns' and 'values' actually exist
+        # Just check that the columns that are going to be used for 'columns' and 'values' actually exist
         elif columns in self.columns and values in self.columns:
             new_df = self.df.pivot(index=index, columns=columns, values=values).reset_index()
             for col in index:
@@ -983,6 +996,7 @@ class XMLFrame:
                 temp_xml = XMLFrame(self.name, temp_df, skip_id=True)
                 temp_xml._clean_col_names()
                 self.pivot = [temp_xml]
+                self.df = DataFrame()
 
         else:
             raise ValueError('You are attempting to pivot an invalid XML Frame.')

@@ -1,3 +1,5 @@
 config.ini
 .idea/
 /venv/
+/csv_comp/
+/log

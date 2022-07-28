@@ -346,13 +346,8 @@ class FFIFile:
             elif table == 'project_plot':
                 cols = {'PlotID': 'plot_id',
                         'ProjectUnit_Name': 'project_name'}
-                frame = self['MM_ProjectUnit_MacroPlot'] \
-                    .merge(self['ProjectUnit'], left_on='MM_ProjectUnit_GUID', right_on='ProjectUnit_GUID',
-                           how='left') \
-                    .merge(plot_id.to_df(), left_on='MM_MacroPlot_GUID', right_on='MacroPlot_GUID', how='left')
-
-                x_frame = XMLFrame(table, frame)
-                final = x_frame[cols]
+                final = plot_id[cols]
+                final.name = 'project_plot'
 
             elif table == 'species':
                 cols = {'MasterSpecies_Symbol': 'symbol',
@@ -404,6 +399,7 @@ class FFIFile:
                 ed_idx = ['event_id']
                 x_frame = XMLFrame(table, frame)
                 final = x_frame[cols]
+
                 final.drop_duplicate_fields(ed_idx)
                 final.pivot_data(ed_idx)
 
@@ -422,6 +418,8 @@ class FFIFile:
                     .merge(sample_data, left_on='AttributeData_SampleRow_ID',
                            right_on='SampleData_SampleRow_ID', how='left') \
                     .merge(event_id.to_df(), left_on='SampleData_SampleEvent_GUID', right_on='SampleEvent_GUID',
+                           how='left') \
+                    .merge(self['LocalSpecies'], left_on='AttributeData_Value', right_on='LocalSpecies_GUID',
                            how='left')
 
                 md_idx = ['event_id', 'data_row_id']
@@ -802,9 +800,14 @@ class XMLFrame:
             if self.name in ['event_detail', 'method_data']:
                 try:
                     row_val = row['SampleData_Value']
+                    val = str(row_val)
                 except KeyError:
                     row_val = row['AttributeData_Value']
-                val = str(row_val)
+                    species = row['LocalSpecies_Symbol']
+                    if not isna(species):
+                        val = species
+                    else:
+                        val = str(row_val)
             else:
                 raise ValueError
             return val
@@ -967,11 +970,11 @@ class XMLFrame:
             conn.execute(f"select deps_restore_dependencies('{schema}', '{table}')")  # ensures dependencies remain
             transaction.commit()
 
-    def drop_duplicates(self, keep='first', inplace=True):
+    def drop_duplicates(self, keep='first', inplace=True, subset=None):
         """
         replication of pandas DataFrame functionality
         """
-        self.df.drop_duplicates(keep=keep, inplace=inplace)
+        self.df.drop_duplicates(inplace=inplace, keep=keep, subset=subset)
 
     def drop_duplicate_fields(self, *args):
         """
@@ -997,11 +1000,12 @@ class XMLFrame:
         """
 
         if self.name == 'method_data':
-            method_data = self.df
+            methods_temp = self.df
             # group the data by method and create separate data frames for them
+            method_data_null = methods_temp.loc[methods_temp.data_row_id.isna()]
+            method_data = methods_temp.loc[~methods_temp.data_row_id.isna()]
             all_data = {method_name: df.drop(['method'], axis=1)
                         for method_name, df in method_data.groupby(by='method')}
-            method_data_null = method_data.loc[method_data.data_row_id.isna()]
 
             data_list = []
 

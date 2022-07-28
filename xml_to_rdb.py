@@ -26,7 +26,7 @@ lager.addHandler(handler)
 def main():
     # Fill this in before running!!!!
     path = 'C:/Users/Corey/OneDrive/OneDrive - New Mexico Highlands University/FFI_FinalAdminExports_all'
-    debug = False
+    debug = True
 
     # users need to create their own local config file (see README)
     config = configparser.ConfigParser()
@@ -52,7 +52,9 @@ def main():
 
         # find all XML files in the path directory
         try:
+
             xml_files = [f for f in os.scandir(path) if f.is_file() and '.xml' in f.path]
+
             try:
                 dup_query = 'select file from file_info'
                 with pg_engine.connect() as pg_con:
@@ -104,13 +106,16 @@ def main():
             lager.exception("An exception occurred")
 
     else:
-        debug_file = ''  # '16.12_UpperMoraCFRPWalkerFlats_adminexport_QC\'edSASKM_2019.xml'
-        path = os.path.join(path, debug_file)
-        file = path
-        ffi_data = FFIFile(file)
+        debug_file = 'RGWF_TNC_CPLA_RanchoLobo_adminexport_8.3.17.xml'
+        file2 = 'RGWF_TNC_RanchoLobo_2016_adminexport_Rob_3.27.17.xml'
+        f_path = os.path.join(path, debug_file)
+        f_path2 = os.path.join(path, file2)
+
+        ffi_data1 = FFIFile(f_path)
+        ffi_data2 = FFIFile(f_path2)
         # ffi_data.tables_to_csv()
-        data = ffi_data.get_tables()
-        # print("doing debug things")
+        # data = ffi_data.get_tables()
+        print("doing debug things")
 
 
 if __name__ == "__main__":

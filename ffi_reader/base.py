@@ -1,6 +1,6 @@
 import os
 import logging
-from pandas import DataFrame, concat, isna, read_sql, options
+from pandas import DataFrame, concat, isna, read_sql, options, to_datetime
 from re import sub, findall, match
 from datetime import date
 from sqlalchemy import exc, MetaData, Table, text, sql
@@ -107,6 +107,13 @@ def strip_namespace(string):
     return new_string
 
 
+def quoted_list(this_list: [str]):
+    quoted_items = [f"'{thing}'" for thing in this_list]
+    list_str = ','.join(quoted_items)
+
+    return list_str
+
+
 class FFIFile:
     """
     this is a class that represents the entire XML file. It can be thought of as a collection of 'tables' represented by
@@ -131,19 +138,19 @@ class FFIFile:
         self._base_tables = {}
         self._data_map = {}
         self._tables = {}
+        self._filtered = False
 
         self._parse_data()
 
         self.ffi_version = self._data_map['Schema_Version']['Schema_Version'][0]
 
         self._create_cte_tables()
-        self._create_tables()
 
-        self.admin_units = self.get_admin_units()
-        self.projects = self.get_projects()
-        self.events = self.get_events()
-        self.plots = self.get_plots()
-        self.methods = self.get_methods()
+        self.admin_units = list(self._base_tables['admin_unit'].to_df()['RegistrationUnit_Name'].unique())
+        self.projects = list(self._base_tables['project'].to_df()['ProjectUnit_Name'].unique())
+        self.events = list(self._base_tables['event_id'].to_df()['EventID'].unique())
+        self.plots = list(self._base_tables['plot_id'].to_df()['PlotID'].unique())
+        self.methods = list(self._base_tables['attr_data'].to_df()['Method_Name'].unique())
 
     def __getitem__(self, item):
         """
@@ -177,25 +184,100 @@ class FFIFile:
             df = concat(dfs)
             self._data_map[strip_namespace(table)] = df
 
-    def exists_admin_export(self, conn):
-        """
-        This will use the conn element to check if the specific export has already been written to the database.
-        This needs to be fixed, as admin units are proving to be ineffectual.
+    def _check_admin_exists(self, con):
 
-        :param conn: SQLAlchemy PostgreSQL connection object for the production database
-        """
-
-        query = """select file_id, ffi_version from file_info
-                     where file_id = '{}' and ffi_version = '{}'""".format(self._id,
-                                                                           self.ffi_version)
+        cur_admin = quoted_list(self.admin_units)
+        admin_query = f"select admin_unit from admin_unit where admin_unit in ({cur_admin})"
         try:
-            exist = read_sql(query, conn)
-            if len(exist) > 0:
+            admin_exist = read_sql(admin_query, con)
+
+            if len(admin_exist) > 0:
+                old_admins = list(admin_exist['admin_unit'])
+                intersect = [unit for unit in old_admins if unit not in self.admin_units]
+                if len(intersect) == 0:
+                    return True
+                else:
+                    return False
+            else:
+                return False
+        except exc.ProgrammingError:
+            return False
+
+    def _check_file_exists(self, con):
+
+        file_id = self._id
+        admin_query = f"select file_id from file_info where file_id in ({file_id})"
+        try:
+            admin_exist = read_sql(admin_query, con)
+
+            if len(admin_exist) > 0:
                 return True
             else:
                 return False
         except exc.ProgrammingError:
             return False
+
+    def filter_existing_data(self, con, exists_error=True):
+        """
+        This generates a list of unique identifiers contained within the FFI File (event IDs, plot IDs, projects, and
+        admin units. This will only run if the admin units found in the current file current exist in the given database.
+        If the admin unit is already in there, then this function will modify the current identifiers and use those lists
+        as a filter.
+
+        :param con: SQLAlchemy PostgreSQL connection object for the production database
+        """
+        if exists_error:
+            file_exists = self._check_file_exists(con)
+            if file_exists:
+                raise FileExistsError(f"The file {self.file} already exists in the provided database.")
+
+        admin_exists = self._check_admin_exists(con)
+        if admin_exists:
+            self._filtered = True
+
+            filter_list = [
+                {'base_table': 'admin_unit', 'cur_set': self.admin_units, 'sql_table': 'admin_unit',
+                 'id': 'admin_unit', 'base_id': 'RegistrationUnit_Name'},
+                {'base_table': 'project', 'cur_set': self.projects, 'sql_table': 'project',
+                 'id': 'project_name', 'base_id': 'ProjectUnit_Name'},
+                {'base_table': 'plot_id', 'cur_set': self.plots, 'sql_table': 'plot',
+                 'id': 'plot_id', 'base_id': 'PlotID'},
+                {'base_table': 'event_id', 'cur_set': self.events, 'sql_table': 'sampling_event',
+                 'id': 'event_id', 'base_id': 'EventID'}
+            ]
+
+            try:
+                for filter_set in filter_list:
+                    # base_table, cur_set, sql_table, id = *filter_set
+                    filter_id = filter_set['id']
+                    table_name = filter_set['base_table']
+                    base_id = filter_set['base_id']
+                    current = filter_set['cur_set']
+                    sql_table = filter_set['sql_table']
+
+                    cur = quoted_list(current)
+                    query = f"select distinct {filter_set['id']} from {sql_table} where {filter_id} in ({cur})"
+
+                    exists = read_sql(query, con)
+                    if len(exists) > 0:
+                        base_set = self._base_tables[table_name].to_df()
+                        old_set = list(exists[filter_id])
+                        new_set = base_set.loc[~base_set[base_id].isin(old_set)]
+                        new_ids = list(new_set[base_id].unique())
+
+                        if table_name == 'admin_unit':
+                            self.admin_units = new_ids
+                        elif table_name == 'project':
+                            self.projects = new_ids
+                        elif table_name == 'plot_id':
+                            self.plots = new_ids
+                        elif table_name == 'event_id':
+                            self.events = new_ids
+
+                        self._base_tables[table_name] = XMLFrame(table_name, new_set)
+
+            except exc.ProgrammingError:
+                pass
 
     def _create_cte_tables(self):
         """
@@ -216,7 +298,8 @@ class FFIFile:
                    right_on='RegistrationUnit_GUID', how='left') \
             .merge(self['MM_ProjectUnit_MacroPlot'], left_on='MacroPlot_GUID',
                    right_on='MM_MacroPlot_GUID', how='left') \
-            .merge(self['ProjectUnit'], left_on='MM_ProjectUnit_GUID', right_on='ProjectUnit_GUID', how='left')
+            .merge(self['ProjectUnit'], left_on='MM_ProjectUnit_GUID', right_on='ProjectUnit_GUID', how='left') \
+            .dropna(subset=['ProjectUnit_GUID'])
         plot_id = XMLFrame('plot', plot_table)
 
         # again, some computations need to be done early on, so we create the values here
@@ -231,12 +314,14 @@ class FFIFile:
 
         # similar to plots, we create the event_id as a unique identifier and that needs to be linked across
         # several disparate tables.
-        event_table = self['SampleEvent'].merge(plot_table, left_on='SampleEvent_Plot_GUID',
+        event_table = self['SampleEvent']\
+            .merge(plot_table, left_on='SampleEvent_Plot_GUID',
                                                 right_on='MacroPlot_GUID', how='left') \
             .merge(self['MM_MonitoringStatus_SampleEvent'], left_on='SampleEvent_GUID', right_on='MM_SampleEvent_GUID',
                    how='left') \
             .merge(self['MonitoringStatus'], left_on='MM_MonitoringStatus_GUID', right_on='MonitoringStatus_GUID',
-                   how='left')
+                   how='left') \
+            .dropna(subset=['ProjectUnit_GUID'])
         event_id = XMLFrame('sampling_event', event_table)
 
         project_table = self['ProjectUnit'].merge(self['RegistrationUnit'],
@@ -261,7 +346,7 @@ class FFIFile:
 
         self._base_tables = table_dict
 
-    def _create_tables(self):
+    def create_tables(self, filter_con=None):
         """
         The meat of it.
 
@@ -285,6 +370,8 @@ class FFIFile:
         table_list = ['file_info', 'admin_unit', 'sampling_event', 'monitoring_status', 'project',
                       'species', 'plot', 'project_plot', 'event_detail', 'method_data']
         frames = {}
+
+        # if self._filtered:
 
         for table in table_list:
 
@@ -414,13 +501,14 @@ class FFIFile:
                 sample_data_temp = self['SampleData']
                 sample_data_all = sample_data_temp[['SampleData_SampleRow_ID', 'SampleData_SampleEvent_GUID']]
                 sample_data = sample_data_all.drop_duplicates()
-                frame = attr_data.to_df() \
+                frame_all = attr_data.to_df() \
                     .merge(sample_data, left_on='AttributeData_SampleRow_ID',
                            right_on='SampleData_SampleRow_ID', how='left') \
                     .merge(event_id.to_df(), left_on='SampleData_SampleEvent_GUID', right_on='SampleEvent_GUID',
                            how='left') \
                     .merge(self['LocalSpecies'], left_on='AttributeData_Value', right_on='LocalSpecies_GUID',
                            how='left')
+                frame = frame_all.loc[~frame_all['EventID'].isna()]
 
                 md_idx = ['event_id', 'data_row_id']
                 x_frame = XMLFrame(table, frame)
@@ -432,11 +520,13 @@ class FFIFile:
                 raise EnvironmentError
 
             if final.pivot is not None:
-                if len(final.pivot) > 1:
+                if (piv_len := len(final.pivot)) > 1:
                     for frame in final.pivot:
                         frames[frame.name] = frame
-                else:
+                elif piv_len == 1:
                     frames[table] = final.pivot[0]
+                else:
+                    pass
             else:
                 frames[table] = final
             print("Processed {} table.".format(table))
@@ -462,36 +552,28 @@ class FFIFile:
             df = ctes[key].to_df()
             df.to_csv('csv/{}.csv'.format(key))
 
-    def get_admin_units(self):
-        admin_units = self._tables['admin_unit'].to_df()
+    def _get_unique_ids(self):
+        admin_units = self._base_tables['admin_unit'].to_df()
         units = list(admin_units['admin_unit'].unique())
 
-        return units
-
-    def get_projects(self):
-        projects = self._tables['project'].to_df()
+        projects = self._base_tables['project'].to_df()
         proj_names = list(projects['project_name'].unique())
 
-        return proj_names
-
-    def get_plots(self):
-        plots = self._tables['plot'].to_df()
+        plots = self._base_tables['plot_id'].to_df()
         plot_names = list(plots['plot_id'].unique())
 
-        return plot_names
-
-    def get_events(self):
-        events = self._tables['sampling_event'].to_df()
+        events = self._base_tables['event_id'].to_df()
         event_ids = list(events['event_id'].unique())
 
-        return event_ids
-
-    def get_methods(self):
         methods_temp = self._base_tables['attr_data'].to_df()
         methods_valid = methods_temp.loc[~methods_temp['AttributeData_Value'].isna()]
         methods = list(methods_valid['Method_Name'].unique())
 
-        return methods
+        self.admin_units = units
+        self.projects = proj_names
+        self.plots = plot_names
+        self.events = event_ids
+        self.methods = methods
 
 
 class XMLFrame:
@@ -524,6 +606,9 @@ class XMLFrame:
         self.columns = self.df.columns
         self.pivot = None  # this just stores if a DataFrame has been pivoted
         self.method_type = method_type
+
+        self._clean_dates()
+        self.drop_duplicates()
 
         if not skip_id:
             try:
@@ -570,7 +655,7 @@ class XMLFrame:
         except KeyError:
             non_cols = [col for col in new_cols if col not in self.df.keys()]
             for col in non_cols:
-                self.df[col] = None
+                self.df[col] = ''
             new_df = self.df[new_cols]
 
         if is_dict:
@@ -587,6 +672,13 @@ class XMLFrame:
         if isinstance(col, str):
             self.df[col] = value
 
+    def _clean_dates(self):
+
+        date_cols = [col for col in self.columns if 'date' in col]
+        for col_name in date_cols:
+            new_col = to_datetime(self.df[col_name], utc=True).dt.normalize()
+            self[col_name] = new_col
+
     def _create_ids(self):
         """
         creates an id column - attempts to determine which id column will get created based on column names.
@@ -602,11 +694,12 @@ class XMLFrame:
                 vals = [row[col] for col in col_list]
                 norm_plot = ''.join(findall(r'\w+', vals[1])).upper().replace('-', '').replace('_', '').replace(' ', '')
 
-                norm_admin = vals[2][:5].upper().replace('-', '').replace('_', '').replace(' ', '')
                 if no_date:
+                    norm_admin = vals[2][:10].upper().replace('-', '').replace('_', '').replace(' ', '')
                     item_id = '-'.join([norm_admin, norm_plot])
                 else:
                     norm_date = to_datenum(vals[0])
+                    norm_admin = vals[2][:5].upper().replace('-', '').replace('_', '').replace(' ', '')
                     item_id = '-'.join([norm_admin, norm_plot, norm_date])
 
                 return item_id
@@ -730,7 +823,7 @@ class XMLFrame:
         # if ('MonitoringStatus_Suffix' in self.columns or
         #     'MonitoringStatus_Prefix' in self.columns or
         #     'MonitoringStatus_Base' in self.columns or
-        #     'SampleEvent_DefaultMonitoringStatus' in self.columns) and \
+        #     'SampleEvent_DefeventaultMonitoringStatus' in self.columns) and \
         if self.name in ['monitoring_status', 'sampling_event'] and \
                 'status_prefix' not in self.columns and \
                 'monitoring_type' not in self.columns and \
@@ -833,11 +926,11 @@ class XMLFrame:
 
         type_mapping = {
             'Float': 'float64',
-            'Long': 'int64',
+            'Long': 'Int64',
             'Boolean': 'bool',
             'Date/Time': 'datetime64',
             'Text': 'str',
-            'Index': 'int64',
+            'Index': 'Int64',
             'Species': 'str',
             'Memo': 'str',
             'GUID': 'str'
@@ -849,7 +942,7 @@ class XMLFrame:
             exclude = []
         try:
             df = self.df
-            types = type_df[['field_name', 'data_type']]
+            types = type_df[['field_name', 'data_type']].drop_duplicates()
             field_list = list(types['field_name'])
             type_list = list(types['data_type'])
             type_dict = dict(zip(field_list, type_list))
@@ -861,11 +954,7 @@ class XMLFrame:
             for column in columns:
                 column_type = type_dict[column]
                 df_type = type_mapping[column_type]
-                if df_type in ['int64']:
-                    row = df[column].fillna(0)
-                    type_row = row.astype(df_type)
-                    df[column] = type_row
-                elif df_type in ['str']:
+                if df_type in ['str']:
                     row = df[column].fillna('')
                     type_row = row.astype(df_type)
                     df[column] = type_row
@@ -920,7 +1009,8 @@ class XMLFrame:
             # get some info about the current table in the database
             md = MetaData()
             table = Table(table_name, md, autoload=True, autoload_with=conn)
-            cols_list = [column.key for column in table.columns]
+            col_dict = {column.key: column.type.python_type
+                        for column in table.columns}
 
             # these next two blocks copy the old table to a temp backup table
             conn.execute(
@@ -934,9 +1024,20 @@ class XMLFrame:
             )
 
             # ensure ALL columns (including ones from the old table not in the new table) get added to the DataFrame
-            old_cols = [col for col in cols_list if col not in df.columns]
+            # and we need to re-cast the old columns since they'll otherwise just be written as strings
+            old_cols = [col for col in col_dict.keys() if col not in df.columns]
             for col in old_cols:
-                df[col] = None
+                col_type = col_dict[col]
+                if col_type == str:
+                    df[col] = ''  # value will show up as a literal 'None' if we don't use an empty string
+                else:
+                    df[col] = None
+
+                # we have to recast as the newer Int64 data type to handle NULL integer values
+                if col_type == int:
+                    col_type = 'Int64'
+
+                df[col] = df[col].astype(col_type)
 
             # write the new dataframe to the database with all columns
             df.to_sql(
@@ -953,9 +1054,9 @@ class XMLFrame:
                 text(
                     "insert into "
                     + sql.quoted_name(table_name, quote=False)
-                    + f" ({','.join(cols_list)}) "
+                    + f" ({','.join(col_dict.keys())}) "
                     + " select "
-                    + f" {','.join(cols_list)} "
+                    + f" {','.join(col_dict.keys())} "
                     + "from "
                     + sql.quoted_name(table_name + "_backup", quote=False)
                 )

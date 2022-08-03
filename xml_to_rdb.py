@@ -26,7 +26,7 @@ lager.addHandler(handler)
 def main():
     # Fill this in before running!!!!
     path = 'C:/Users/Corey/OneDrive/OneDrive - New Mexico Highlands University/FFI_FinalAdminExports_all'
-    debug = True
+    debug = False
 
     # users need to create their own local config file (see README)
     config = configparser.ConfigParser()
@@ -71,7 +71,7 @@ def main():
 
             for export in new_files:
                 file = export.path
-                f_name = re.findall(r"\\([\w._ ']+.xml)", file)
+                f_name = re.findall(r"\\([\w._ ']+.xml)", file)[0]
 
                 lager.info('Initializing XML parser for {}'.format(f_name))
 
@@ -80,38 +80,40 @@ def main():
                 # now we just write all the XML data to the database
                 with pg_engine.connect() as pg_con1:
                     # check for already being written
-                    exist = ffi_data.exists_admin_export(pg_con1)
+                    try:
+                        ffi_data.filter_existing_data(pg_con1)
 
-                if exist:
-                    lager.info('Data from {} has already been parsed into the provided database.'.format(f_name))
-                    # print('{} has already been parsed into the specified database.\n'.format(f_name))
-                    continue
+                # if f_name == '06.11_OakSpringsCFRP_adminexport_1.4.21_QCedbyLRKM.xml':
+                #     print("debug")
 
-                else:
-                    # print('Tables for {} have not yet been created yet.\n'.format(f_name))
-                    lager.info('Creating tables for {}'.format(f_name))
-                    data = ffi_data.get_tables()
-                    for table in data:
-                        with pg_engine.connect() as pg_con2:
-                            table.to_sql(pg_con2)
-                            if (table_len := len(table.df)) > 0:
-                                # print('{} written to {}: {} lines of data.\n'.format(table.name,
-                                #                                                      pg_config['database'],
-                                #                                                      table_len))
-                                lager.info('{} written to {}: {} lines of data.\n'.format(table.name,
-                                                                                          pg_config['database'],
-                                                                                          table_len))
-                    lager.info('Finished parsing {}'.format(f_name))
+                        ffi_data.create_tables()
+
+                        lager.info('Creating tables for {}'.format(f_name))
+                        data = ffi_data.get_tables()
+                        for table in data:
+                            with pg_engine.connect() as pg_con2:
+                                table.to_sql(pg_con2)
+                                if (table_len := len(table.df)) > 0:
+                                    # print('{} written to {}: {} lines of data.\n'.format(table.name,
+                                    #                                                      pg_config['database'],
+                                    #                                                      table_len))
+                                    lager.info('{} written to {}: {} lines of data.\n'.format(table.name,
+                                                                                              pg_config['database'],
+                                                                                              table_len))
+                        lager.info('Finished parsing {}'.format(f_name))
+                    except FileExistsError:
+                        lager.warning(f"{ffi_data.file} has already been parsed into database")
         except Exception as e:
             lager.exception("An exception occurred")
 
     else:
-        debug_file = 'RGWF_TNC_CPLA_RanchoLobo_adminexport_8.3.17.xml'
-        file2 = 'RGWF_TNC_RanchoLobo_2016_adminexport_Rob_3.27.17.xml'
-        f_path = os.path.join(path, debug_file)
+        path = 'C:/Users/Corey/OneDrive/OneDrive - New Mexico Highlands University/FFI_test'
+        # debug_file = "16.12_UpperMoraCapulin_NOSMALLTREES_adminexport_QC'edKM_2019.xml"
+        file2 = "16.12_UpperMoraCFRPWalkerFlats_adminexport_QC'edSASKM_2019.xml"
+        # f_path = os.path.join(path, debug_file)
         f_path2 = os.path.join(path, file2)
 
-        ffi_data1 = FFIFile(f_path)
+        # ffi_data1 = FFIFile(f_path)
         ffi_data2 = FFIFile(f_path2)
         # ffi_data.tables_to_csv()
         # data = ffi_data.get_tables()

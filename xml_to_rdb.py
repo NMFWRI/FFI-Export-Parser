@@ -25,7 +25,7 @@ lager.addHandler(handler)
 
 def main():
     # Fill this in before running!!!!
-    path = 'C:/Users/Corey/OneDrive/OneDrive - New Mexico Highlands University/FFI_FinalAdminExports_all'
+    path = ''  # e.g. 'C:/Users/Corey/OneDrive/OneDrive - New Mexico Highlands University/FFI_FinalAdminExports_all'
     debug = False
 
     # users need to create their own local config file (see README)
